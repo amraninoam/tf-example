@@ -1,0 +1,63 @@
+resource "aws_route53_zone" "main" {
+  count = var.public_hosted_zone_name != "" ? 1 : 0
+  name  = var.public_hosted_zone_name
+}
+
+resource "aws_acm_certificate" "cert" {
+  count             = var.certificate_name != "" && var.certificate_arn == "" ? 1 : 0
+  domain_name       = "*.${var.certificate_name}"
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_acm_certificate_validation" "cert" {
+  count                   = var.certificate_name != "" && var.certificate_arn == "" ? 1 : 0
+  certificate_arn         = aws_acm_certificate.cert[0].arn
+  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+
+resource "aws_route53_record" "cert_validation" {
+  count   = var.certificate_name != "" && var.certificate_arn == "" ? length(aws_acm_certificate.cert[0].domain_validation_options) : 0
+  name    = aws_acm_certificate.cert[0].domain_validation_options[count.index].resource_record_name
+  type    = aws_acm_certificate.cert[0].domain_validation_options[count.index].resource_record_type
+  zone_id = aws_route53_zone.main[0].id
+  records = [aws_acm_certificate.cert[0].domain_validation_options[count.index].resource_record_value]
+  ttl     = 60
+}
+
+resource "aws_lb" "alb" {
+  count = (var.certificate_arn != "" || var.certificate_name != "") ? 1 : 0
+  name  = "my-alb"
+  internal = false
+  load_balancer_type = "application"
+  security_groups = [/* your security group IDs */]
+  subnets         = [/* your subnet IDs */]
+
+  enable_deletion_protection = false
+}
+
+resource "aws_lb_listener" "front_end" {
+  count              = (var.certificate_arn != "" || var.certificate_name != "") ? 1 : 0
+  load_balancer_arn  = aws_lb.alb[0].arn
+  port               = 443
+  protocol           = "HTTPS"
+  ssl_policy         = "ELBSecurityPolicy-2016-08"
+  certificate_arn    = var.certificate_arn != "" ? var.certificate_arn : aws_acm_certificate_validation.cert[0].certificate_arn
+
+  default_action {
+    type             = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "404: Not Found"
+      status_code  = "404"
+    }
+  }
+}
+
+output "hosted_zone_ns_records" {
+  value = aws_route53_zone.main[0].name_servers
+  description = "NS records for the hosted zone to update at the domain registrar."
+}
